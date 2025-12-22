@@ -19,7 +19,7 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
-    container: rust:bookworm
+    container: rust:trixie
     name: Clippy
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    container: rust:bookworm
+    container: rust:trixie
     name: Test
     steps:
       - uses: actions/checkout@v4
