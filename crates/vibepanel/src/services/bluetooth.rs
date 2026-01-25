@@ -704,16 +704,68 @@ impl BluetoothService {
             move |res| {
                 match res {
                     Ok(proxy) => {
+                        let proxy_for_trust = proxy.clone();
+                        let proxy_for_connect = proxy.clone();
+
                         proxy.call(
                             "Pair",
                             None,
                             DBusCallFlags::NONE,
                             30000, // Pairing can take time
                             None::<&gio::Cancellable>,
-                            |res| {
-                                if let Err(e) = res {
-                                    error!("BluetoothService: Pair failed: {}", e);
+                            move |res| {
+                                let pair_err = res.err();
+                                let allow_connect = match pair_err.as_ref() {
+                                    None => true,
+                                    Some(err) => err.to_string().contains("AlreadyExists"),
+                                };
+
+                                if let Some(err) = pair_err.as_ref() {
+                                    // Reduce noise: AlreadyExists just means we can proceed.
+                                    if !allow_connect {
+                                        error!("BluetoothService: Pair failed: {}", err);
+                                    }
                                 }
+
+                                if !allow_connect {
+                                    return;
+                                }
+
+                                // Trust the device so future reconnects are seamless.
+                                let trusted_variant = Variant::tuple_from_iter([
+                                    DEVICE_IFACE.to_variant(),
+                                    "Trusted".to_variant(),
+                                    glib::Variant::from_variant(&true.to_variant()),
+                                ]);
+
+                                proxy_for_trust.call(
+                                    "org.freedesktop.DBus.Properties.Set",
+                                    Some(&trusted_variant),
+                                    DBusCallFlags::NONE,
+                                    5000,
+                                    None::<&gio::Cancellable>,
+                                    |res| {
+                                        if let Err(e) = res {
+                                            error!(
+                                                "BluetoothService: failed to mark device trusted: {}",
+                                                e
+                                            );
+                                        }
+                                    },
+                                );
+
+                                proxy_for_connect.call(
+                                    "Connect",
+                                    None,
+                                    DBusCallFlags::NONE,
+                                    30000, // Bluetooth connections can take time
+                                    None::<&gio::Cancellable>,
+                                    |res| {
+                                        if let Err(e) = res {
+                                            error!("BluetoothService: Connect after pair failed: {}", e);
+                                        }
+                                    },
+                                );
                             },
                         );
                     }
