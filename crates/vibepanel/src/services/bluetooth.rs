@@ -31,6 +31,17 @@ const DEVICE_UPDATE_DEBOUNCE_MS: u64 = 100;
 /// BlueZ uses reference counting, so we must stop what we started.
 const SCAN_DURATION_SECS: u32 = 10;
 
+/// Check if a device name looks like a MAC address (fallback name).
+/// MAC format: XX-XX-XX-XX-XX-XX or XX:XX:XX:XX:XX:XX (17 chars).
+fn is_mac_like_name(name: &str) -> bool {
+    name.len() == 17
+        && name
+            .chars()
+            .nth(2)
+            .map(|c| c == '-' || c == ':')
+            .unwrap_or(false)
+}
+
 /// A single Bluetooth device exposed by BlueZ.
 #[derive(Debug, Clone)]
 pub struct BluetoothDevice {
@@ -39,6 +50,7 @@ pub struct BluetoothDevice {
     pub address: String,
     pub connected: bool,
     pub paired: bool,
+    pub trusted: bool,
     pub icon: Option<String>,
 }
 
@@ -422,8 +434,20 @@ impl BluetoothService {
                 }
             }
             devices.sort_by(|a, b| {
-                let key_a = (!a.connected, !a.paired, a.name.to_lowercase());
-                let key_b = (!b.connected, !b.paired, b.name.to_lowercase());
+                let key_a = (
+                    !a.connected,
+                    !a.paired,
+                    !a.trusted,
+                    is_mac_like_name(&a.name),
+                    a.name.to_lowercase(),
+                );
+                let key_b = (
+                    !b.connected,
+                    !b.paired,
+                    !b.trusted,
+                    is_mac_like_name(&b.name),
+                    b.name.to_lowercase(),
+                );
                 key_a.cmp(&key_b)
             });
             return devices;
@@ -442,10 +466,22 @@ impl BluetoothService {
             }
         }
 
-        // Sort: connected first, then paired, then by name
+        // Sort: connected first, then paired, then trusted, then readable names before MAC-like, then by name
         devices.sort_by(|a, b| {
-            let key_a = (!a.connected, !a.paired, a.name.to_lowercase());
-            let key_b = (!b.connected, !b.paired, b.name.to_lowercase());
+            let key_a = (
+                !a.connected,
+                !a.paired,
+                !a.trusted,
+                is_mac_like_name(&a.name),
+                a.name.to_lowercase(),
+            );
+            let key_b = (
+                !b.connected,
+                !b.paired,
+                !b.trusted,
+                is_mac_like_name(&b.name),
+                b.name.to_lowercase(),
+            );
             key_a.cmp(&key_b)
         });
 
@@ -484,6 +520,7 @@ impl BluetoothService {
         let mut name = String::new();
         let mut connected = false;
         let mut paired = false;
+        let mut trusted = false;
         let mut icon: Option<String> = None;
 
         let n = props.n_children();
@@ -501,6 +538,7 @@ impl BluetoothService {
                 "Name" => name = inner.get::<String>().unwrap_or_default(),
                 "Connected" => connected = inner.get::<bool>().unwrap_or(false),
                 "Paired" => paired = inner.get::<bool>().unwrap_or(false),
+                "Trusted" => trusted = inner.get::<bool>().unwrap_or(false),
                 "Icon" => icon = inner.get::<String>(),
                 _ => {}
             }
@@ -520,6 +558,7 @@ impl BluetoothService {
             address,
             connected,
             paired,
+            trusted,
             icon,
         }
     }
