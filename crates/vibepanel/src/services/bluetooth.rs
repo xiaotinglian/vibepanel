@@ -717,7 +717,9 @@ impl BluetoothService {
                                 let pair_err = res.err();
                                 let allow_connect = match pair_err.as_ref() {
                                     None => true,
-                                    Some(err) => err.to_string().contains("AlreadyExists"),
+                                    Some(err) => gio::DBusError::remote_error(err)
+                                        .map(|e| e == "org.bluez.Error.AlreadyExists")
+                                        .unwrap_or(false),
                                 };
 
                                 if let Some(err) = pair_err.as_ref() {
