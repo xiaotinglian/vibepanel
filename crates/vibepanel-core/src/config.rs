@@ -414,6 +414,10 @@ pub struct BarConfig {
     /// Distance from bar edge to first/last section in pixels.
     pub inset: u32,
 
+    /// Vertical padding inside the bar (extends bar height without shrinking widgets).
+    /// Default: 4
+    pub padding: u32,
+
     /// Border radius (percentage of bar height).
     pub border_radius: u32,
 
@@ -441,8 +445,9 @@ impl Default for BarConfig {
         Self {
             size: 32,
             spacing: 8,
-            screen_margin: 4,
+            screen_margin: 0,
             inset: 8,
+            padding: 4,
             border_radius: 30,
             popover_offset: 1,
             outputs: Vec::new(),
@@ -787,7 +792,7 @@ impl WidgetPlacement {
 /// disabled = true
 /// show_percentage = true
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct WidgetOptions {
     /// If true, this widget is hidden from all sections where it would appear.
     #[serde(default)]
@@ -814,10 +819,6 @@ pub struct WidgetEntry {
 
     /// Merged widget-specific options from `[widgets.<name>]`.
     pub options: HashMap<String, toml::Value>,
-
-    /// Background color override (hex like "#f5c2e7").
-    /// None means use theme default.
-    pub background_color: Option<String>,
 }
 
 impl WidgetEntry {
@@ -826,29 +827,14 @@ impl WidgetEntry {
         Self {
             name: name.into(),
             options: HashMap::new(),
-            background_color: None,
         }
     }
 
     /// Create a widget entry with options from WidgetOptions.
     pub fn with_options(name: impl Into<String>, widget_options: &WidgetOptions) -> Self {
-        let name = name.into();
-
-        // Validate background_color if provided - warn on invalid hex colors
-        if let Some(ref color) = widget_options.background_color
-            && crate::theme::parse_hex_color(color).is_none()
-        {
-            tracing::warn!(
-                "Invalid background_color '{}' for widget '{}' - expected hex color like '#ff0000' or '#f00'",
-                color,
-                name
-            );
-        }
-
         Self {
-            name,
+            name: name.into(),
             options: widget_options.options.clone(),
-            background_color: widget_options.background_color.clone(),
         }
     }
 }
@@ -1068,7 +1054,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.bar.size, 32);
-        assert_eq!(config.bar.screen_margin, 4);
+        assert_eq!(config.bar.screen_margin, 0);
         assert_eq!(config.bar.background_opacity, 0.0);
         assert_eq!(config.widgets.background_opacity, 1.0);
         assert_eq!(config.advanced.compositor, "auto");
@@ -1126,7 +1112,7 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.bar.size, 40);
         // Struct defaults should be applied
-        assert_eq!(config.bar.screen_margin, 4);
+        assert_eq!(config.bar.screen_margin, 0);
         // Without merge, widgets are empty (struct default)
         assert!(config.widgets.left.is_empty());
     }
@@ -1145,7 +1131,7 @@ mod tests {
         assert_eq!(config.bar.size, 40);
 
         // Default values from embedded config should be inherited
-        assert_eq!(config.bar.screen_margin, 4);
+        assert_eq!(config.bar.screen_margin, 0);
 
         // Widgets should come from embedded defaults, not be empty
         assert!(

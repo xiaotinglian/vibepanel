@@ -15,6 +15,7 @@ use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 
 use crate::styles::{icon, surface};
+use crate::widgets::css::WIDGET_BG_WITH_OPACITY;
 
 // GTK 4.10 deprecated widget-scoped style contexts but didn't provide a replacement.
 // We need widget-scoped CSS to style individual surfaces without affecting the entire
@@ -303,22 +304,16 @@ impl SurfaceStyleManager {
     /// The styles are applied at base priority so CSS classes can override
     /// specific properties while GTK themes are still overridden.
     ///
+    /// Background color is determined by CSS variables:
+    /// - Default: Uses `--widget-background-color` from `:root`
+    /// - Per-widget override: Add a class like `.clock-popover` to the widget,
+    ///   which overrides `--widget-background-color` via generated CSS
+    ///
     /// # Arguments
     /// * `widget` - The widget to style
     /// * `with_padding` - Whether to apply padding to the widget
-    /// * `color_override` - Optional background color override (e.g., from parent widget)
-    pub fn apply_surface_styles(
-        &self,
-        widget: &impl IsA<gtk4::Widget>,
-        with_padding: bool,
-        color_override: Option<&str>,
-    ) {
-        self.apply_surface_styles_inner(
-            widget,
-            with_padding,
-            color_override,
-            "var(--radius-surface)",
-        );
+    pub fn apply_surface_styles(&self, widget: &impl IsA<gtk4::Widget>, with_padding: bool) {
+        self.apply_surface_styles_inner(widget, with_padding, "var(--radius-surface)");
     }
 
     /// Apply surface styles with a custom border radius.
@@ -326,23 +321,20 @@ impl SurfaceStyleManager {
     /// # Arguments
     /// * `widget` - The widget to style
     /// * `with_padding` - Whether to apply padding to the widget
-    /// * `color_override` - Optional background color override (e.g., from parent widget)
     /// * `radius` - CSS value for border-radius (e.g., "var(--radius-widget)")
     pub fn apply_surface_styles_with_radius(
         &self,
         widget: &impl IsA<gtk4::Widget>,
         with_padding: bool,
-        color_override: Option<&str>,
         radius: &str,
     ) {
-        self.apply_surface_styles_inner(widget, with_padding, color_override, radius);
+        self.apply_surface_styles_inner(widget, with_padding, radius);
     }
 
     fn apply_surface_styles_inner(
         &self,
         widget: &impl IsA<gtk4::Widget>,
         with_padding: bool,
-        color_override: Option<&str>,
         radius: &str,
     ) {
         let widget = widget.as_ref();
@@ -354,9 +346,9 @@ impl SurfaceStyleManager {
             String::new()
         };
 
-        // Use color override if provided, otherwise use CSS variable for consistency
-        // with widget_opacity setting
-        let bg = color_override.unwrap_or("var(--color-background-widget)");
+        // Use inline color-mix() so per-widget overrides work via CSS scoping
+        // (e.g., .clock-popover overrides --widget-background-color)
+        let bg = WIDGET_BG_WITH_OPACITY;
 
         // Build CSS targeting the widget's CSS name
         // For Popover, we need to target both the popover and its contents
@@ -372,7 +364,7 @@ popover.widget-menu.background {{
     background-image: none;
     border: none;
     border-radius: {radius};
-    box-shadow: {shadow};
+    box-shadow: none;
 }}
 
 popover.widget-menu > contents,
@@ -386,8 +378,8 @@ popover.widget-menu.background > contents {{
     font-size: var(--font-size);
     color: var(--color-foreground-primary);
     {padding}
-    margin: 0;
-    box-shadow: none;
+    margin: 0 6px 6px 6px;
+    box-shadow: {shadow};
 }}
 
 popover.widget-menu > arrow,
@@ -411,13 +403,22 @@ popover.widget-menu.background * {{
             )
         } else {
             // Check if widget has the widget-menu-content class - if so, use
-            // that as the selector for more specific targeting.
+            // that as the selector for more specific targeting. These inner panels
+            // should NOT get a shadow since popover contents node handles that.
             let has_menu_content_class = widget.has_css_class(surface::WIDGET_MENU_CONTENT);
 
             let selector = if has_menu_content_class {
                 format!(".{}", surface::WIDGET_MENU_CONTENT)
             } else {
                 css_name.to_string()
+            };
+
+            // Inner popover panels (.widget-menu-content) don't need shadow -
+            // the popover's contents node handles that. Other surfaces get shadow.
+            let shadow_css = if has_menu_content_class {
+                "none".to_string()
+            } else {
+                styles.shadow.clone()
             };
 
             format!(
@@ -441,7 +442,7 @@ popover.widget-menu.background * {{
                 bg = bg,
                 font = styles.font_family,
                 padding = padding_css,
-                shadow = styles.shadow,
+                shadow = shadow_css,
                 radius = radius,
             )
         };

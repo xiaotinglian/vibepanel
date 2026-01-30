@@ -162,7 +162,6 @@ pub fn rgba_str(r: u8, g: u8, b: u8, a: f64) -> String {
 #[derive(Debug, Clone)]
 pub struct ThemeSizes {
     pub bar_height: u32,
-    pub bar_padding: u32,
     pub widget_height: u32,
     pub widget_padding_x: u32,
     pub widget_padding_y: u32,
@@ -180,7 +179,6 @@ impl Default for ThemeSizes {
     fn default() -> Self {
         Self {
             bar_height: 36,
-            bar_padding: 5,
             widget_height: 26,
             widget_padding_x: 5,
             widget_padding_y: 2,
@@ -282,6 +280,7 @@ pub struct ThemePalette {
     bar_radius_percent: u32,
     widget_radius_percent: u32,
     bar_size: u32,
+    bar_padding: u32,
 }
 
 impl ThemePalette {
@@ -309,10 +308,16 @@ impl ThemePalette {
         format!(
             r#"
 :root {{
+    /* ===== Widget Styling (Base values, can be overridden per-widget) ===== */
+    /* These are combined via color-mix() in widget/popover CSS rules.
+     * --widget-background-opacity is a percentage with % suffix (e.g., "80%").
+     * To override in user CSS, use: --widget-background-opacity: 50%; */
+    --widget-background-color: {widget_bg_color};
+    --widget-background-opacity: {widget_bg_opacity}%;
+
     /* ===== Background Colors ===== */
     /* Bar background with opacity applied via color-mix */
     --color-background-bar: {bar_bg_with_opacity};
-    --color-background-widget: {widget_bg};
 
     /* ===== Foreground Colors ===== */
     --color-foreground-primary: {fg_primary};
@@ -367,7 +372,8 @@ impl ThemePalette {
 
     /* ===== Sizes & Spacing ===== */
     --bar-height: {bar_height}px;
-    --bar-padding: {bar_padding}px;
+    --bar-padding-y: {bar_padding_y}px;
+    --bar-padding-y-bottom: {bar_padding_y_bottom}px;
     --widget-height: {widget_height}px;
     --widget-padding-x: {widget_padding_x}px;
     --widget-padding-y: {widget_padding_y}px;
@@ -409,7 +415,8 @@ impl ThemePalette {
 }}
 "#,
             bar_bg_with_opacity = self.bar_background_with_opacity(),
-            widget_bg = self.widget_background_with_opacity(),
+            widget_bg_color = self.widget_background,
+            widget_bg_opacity = (self.widget_opacity * 100.0).round() as u32,
             fg_primary = self.foreground_primary,
             fg_muted = self.foreground_muted,
             fg_disabled = self.foreground_disabled,
@@ -442,7 +449,15 @@ impl ThemePalette {
             radius_card = self.widget_border_radius,
             radius_pill = self.radius_pill,
             bar_height = self.sizes.bar_height,
-            bar_padding = self.sizes.bar_padding,
+            // Visual padding always applies (widgets offset from edge),
+            // but exclusive zone only includes it when bar is visible (handled in bar.rs)
+            bar_padding_y = self.bar_padding,
+            // Bottom padding is 0 in islands mode (opacity=0) to keep exclusive zone tight
+            bar_padding_y_bottom = if self.bar_opacity > 0.0 {
+                self.bar_padding
+            } else {
+                0
+            },
             widget_height = self.sizes.widget_height,
             widget_padding_x = self.sizes.widget_padding_x,
             widget_padding_y = self.sizes.widget_padding_y,
@@ -478,27 +493,6 @@ impl ThemePalette {
         }
     }
 
-    /// Generate widget background CSS value with opacity applied.
-    ///
-    /// For opacity 0, returns "transparent".
-    /// For opacity 1, returns the raw background color.
-    /// For values in between, uses color-mix to blend with transparent.
-    fn widget_background_with_opacity(&self) -> String {
-        if self.widget_opacity <= 0.0 {
-            "transparent".to_string()
-        } else if self.widget_opacity >= 1.0 {
-            self.widget_background.clone()
-        } else {
-            // Use color-mix to apply opacity to the background
-            // This works for both hex colors and GTK CSS variables like @view_bg_color
-            let opacity_percent = (self.widget_opacity * 100.0).round() as u32;
-            format!(
-                "color-mix(in srgb, {} {}%, transparent)",
-                self.widget_background, opacity_percent
-            )
-        }
-    }
-
     /// Get surface styling for popovers and menus.
     pub fn surface_styles(&self) -> SurfaceStyles {
         SurfaceStyles {
@@ -512,6 +506,49 @@ impl ThemePalette {
             shadow: self.shadow_soft.clone(),
             is_dark_mode: self.is_dark_mode,
         }
+    }
+
+    /// Generate per-widget CSS overrides from `[widgets.xxx]` config sections.
+    ///
+    /// Generates rules like `.widget.clock, .clock-popover { --widget-background-color: #f5c2e7; }`.
+    /// Widget names are normalized to CSS conventions (underscores → hyphens).
+    pub fn generate_per_widget_css(config: &Config) -> String {
+        let mut css = String::new();
+
+        for (widget_name, options) in &config.widgets.widget_configs {
+            let mut rules = Vec::new();
+
+            if let Some(ref color) = options.background_color {
+                if let Some((r, g, b)) = parse_hex_color(color) {
+                    let normalized = format!("#{:02x}{:02x}{:02x}", r, g, b);
+                    rules.push(format!("--widget-background-color: {};", normalized));
+                } else {
+                    tracing::warn!(
+                        "Invalid background_color '{}' for widget '{}' - expected hex color",
+                        color,
+                        widget_name
+                    );
+                }
+            }
+
+            if !rules.is_empty() {
+                let rules_str = rules.join("\n    ");
+                let css_name = widget_name.replace('_', "-");
+                css.push_str(&format!(
+                    r#"
+.widget.{css_name},
+.widget-group.{css_name},
+.{css_name}-popover {{
+    {rules}
+}}
+"#,
+                    css_name = css_name,
+                    rules = rules_str
+                ));
+            }
+        }
+
+        css
     }
 
     fn parse_config(&mut self, config: &Config) {
@@ -615,6 +652,7 @@ impl ThemePalette {
 
         // Bar size
         self.bar_size = config.bar.size;
+        self.bar_padding = config.bar.padding;
     }
 
     fn compute_derived_values(&mut self) {
@@ -759,13 +797,15 @@ impl ThemePalette {
 
     fn compute_sizes(&mut self) {
         let bar_size = self.bar_size;
+        let bar_padding_config = self.bar_padding;
 
         // Round to even numbers for proper pixel-perfect centering
-        let bar_padding = round_to_even((bar_size as f64 * PADDING_SCALE) as u32);
-        let widget_height = round_to_even(bar_size - 2 * bar_padding);
+        // This internal padding is used for widget sizing, separate from user's padding config
+        let internal_bar_padding = round_to_even((bar_size as f64 * PADDING_SCALE) as u32);
+        let widget_height = round_to_even(bar_size - 2 * internal_bar_padding);
 
-        // Bar radius: use rendered height (bar + padding on both sides)
-        let bar_rendered_height = bar_size + 2 * bar_padding;
+        // Bar rendered height includes the user's padding config
+        let bar_rendered_height = bar_size + 2 * bar_padding_config;
         let bar_max_radius = bar_rendered_height / 2;
         self.bar_border_radius =
             (bar_rendered_height * self.bar_radius_percent / 100).min(bar_max_radius);
@@ -787,8 +827,8 @@ impl ThemePalette {
         let pixmap_icon_size = round_to_even((bar_size as f64 * PIXMAP_ICON_SCALE) as u32);
 
         self.sizes = ThemeSizes {
+            // bar_height is the content height (widgets area), CSS padding adds the rest
             bar_height: bar_size,
-            bar_padding,
             widget_height,
             widget_padding_x: (bar_size as f64 * PADDING_SCALE) as u32,
             // Vertical padding - fixed 2px for visual breathing room (already even)
@@ -847,6 +887,7 @@ impl Default for ThemePalette {
             bar_radius_percent: 30,
             widget_radius_percent: 40,
             bar_size: 32,
+            bar_padding: 4,
         }
     }
 }
@@ -934,7 +975,7 @@ mod tests {
         let css = palette.css_vars_block();
 
         assert!(css.contains("--color-background-bar:"));
-        assert!(css.contains("--color-background-widget:"));
+        assert!(css.contains("--widget-background-color:"));
         assert!(css.contains("--color-foreground-primary:"));
         assert!(css.contains("--color-accent-primary:"));
         assert!(css.contains("--radius-bar:"));
@@ -943,9 +984,80 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_per_widget_css_with_background_color() {
+        use crate::config::WidgetOptions;
+
+        let mut config = Config::default();
+        config.widgets.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                background_color: Some("#f5c2e7".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let css = ThemePalette::generate_per_widget_css(&config);
+
+        // Should generate CSS targeting widget, widget-group, and popover
+        assert!(css.contains(".widget.clock"), "should target .widget.clock");
+        assert!(
+            css.contains(".widget-group.clock"),
+            "should target .widget-group.clock"
+        );
+        assert!(
+            css.contains(".clock-popover"),
+            "should target .clock-popover"
+        );
+        // Should set the CSS variable with normalized hex color
+        assert!(
+            css.contains("--widget-background-color: #f5c2e7"),
+            "should set --widget-background-color"
+        );
+    }
+
+    #[test]
+    fn test_generate_per_widget_css_normalizes_underscores() {
+        use crate::config::WidgetOptions;
+
+        let mut config = Config::default();
+        config.widgets.widget_configs.insert(
+            "quick_settings".to_string(),
+            WidgetOptions {
+                background_color: Some("#ff0000".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let css = ThemePalette::generate_per_widget_css(&config);
+
+        // Underscores should be converted to hyphens for CSS class names
+        assert!(
+            css.contains(".widget.quick-settings"),
+            "should normalize underscores to hyphens"
+        );
+        assert!(
+            css.contains(".quick-settings-popover"),
+            "popover class should use hyphens"
+        );
+    }
+
+    #[test]
+    fn test_generate_per_widget_css_empty_without_overrides() {
+        let config = Config::default();
+        let css = ThemePalette::generate_per_widget_css(&config);
+
+        // No widget configs with background_color = empty CSS
+        assert!(
+            css.is_empty() || !css.contains("--widget-background-color"),
+            "should not generate CSS when no overrides configured"
+        );
+    }
+
+    #[test]
     fn test_theme_sizes_computed_from_bar_size() {
         let mut config = Config::default();
         config.bar.size = 48;
+        // bar_height is the content height (bar.size), CSS padding adds the visual padding
         let palette = ThemePalette::from_config(&config);
 
         assert_eq!(palette.sizes.bar_height, 48);
@@ -1050,7 +1162,6 @@ mod tests {
         assert!(palette_large.sizes.widget_height > palette_small.sizes.widget_height);
         assert!(palette_large.sizes.font_size > palette_small.sizes.font_size);
         assert!(palette_large.sizes.text_icon_size > palette_small.sizes.text_icon_size);
-        assert!(palette_large.sizes.bar_padding > palette_small.sizes.bar_padding);
     }
 
     #[test]
@@ -1104,7 +1215,10 @@ mod tests {
             config.bar.border_radius = 100; // Request maximum radius
             let palette = ThemePalette::from_config(&config);
 
-            let max_possible_bar_radius = (bar_size + 2 * palette.sizes.bar_padding) / 2;
+            // Bar radius is computed from rendered height (bar_size + 2*padding config)
+            // With default padding=4, max radius = (bar_size + 8) / 2
+            let bar_rendered_height = bar_size + 2 * config.bar.padding;
+            let max_possible_bar_radius = bar_rendered_height / 2;
             assert!(
                 palette.bar_border_radius <= max_possible_bar_radius,
                 "Bar radius {} exceeds max {} for bar_size={}",

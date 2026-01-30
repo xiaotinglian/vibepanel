@@ -164,6 +164,11 @@ impl ConfigManager {
         self.config.borrow().bar.size
     }
 
+    /// Get the bar padding (vertical padding inside bar) from the current configuration.
+    pub fn bar_padding(&self) -> u32 {
+        self.config.borrow().bar.padding
+    }
+
     /// Get the bar screen margin from the current configuration.
     pub fn screen_margin(&self) -> u32 {
         self.config.borrow().bar.screen_margin
@@ -174,9 +179,9 @@ impl ConfigManager {
         self.config.borrow().bar.popover_offset
     }
 
-    /// Get the widget opacity from the current theme configuration.
-    pub fn widget_opacity(&self) -> f64 {
-        self.config.borrow().widgets.background_opacity
+    /// Get the bar background opacity from the current configuration.
+    pub fn bar_background_opacity(&self) -> f64 {
+        self.config.borrow().bar.background_opacity
     }
 
     /// Get a widget option value from the current configuration.
@@ -442,6 +447,14 @@ impl ConfigManager {
     }
 }
 
+/// Check if per-widget style overrides have changed (triggers CSS-only reload).
+///
+/// This detects when widget-specific styling options (like `background_color`)
+/// are added, removed, or changed in `[widgets.xxx]` sections.
+fn per_widget_styles_changed(old: &Config, new: &Config) -> bool {
+    old.widgets.widget_configs != new.widgets.widget_configs
+}
+
 /// Check if theme-related config has changed.
 fn config_theme_changed(old: &Config, new: &Config) -> bool {
     old.theme.mode != new.theme.mode
@@ -460,6 +473,8 @@ fn config_theme_changed(old: &Config, new: &Config) -> bool {
         || old.bar.size != new.bar.size
         // advanced.pango_font_rendering affects how fonts are applied
         || old.advanced.pango_font_rendering != new.advanced.pango_font_rendering
+        // Per-widget style overrides (background_color, etc.)
+        || per_widget_styles_changed(old, new)
 }
 
 /// Check if structural configuration has changed (requires bar rebuild).
@@ -487,6 +502,14 @@ fn config_structure_changed(old: &Config, new: &Config) -> bool {
 
     if old.bar.inset != new.bar.inset {
         debug!("bar.inset changed ({} -> {})", old.bar.inset, new.bar.inset);
+        return true;
+    }
+
+    if old.bar.padding != new.bar.padding {
+        debug!(
+            "bar.padding changed ({} -> {})",
+            old.bar.padding, new.bar.padding
+        );
         return true;
     }
 
