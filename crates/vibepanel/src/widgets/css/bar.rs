@@ -50,6 +50,32 @@ sectioned-bar.bar {{
     min-height: var(--widget-height);
 }}
 
+/* Widget groups - remove padding so hover can extend to edges */
+.widget.widget-group {{
+    padding: 0;
+}}
+
+/* Widget hover state - standalone widgets */
+.widget:not(.widget-group):hover {{
+    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+}}
+
+/* Widget items inside groups - symmetric padding for hover area */
+.widget-group > .content > .widget-item {{
+    padding: var(--widget-padding-y) 10px;
+}}
+
+/* Pull non-first items left to overlap with previous item's right padding */
+.widget-group > .content > .widget-item:not(:first-child) {{
+    margin-left: -20px;
+}}
+
+/* Widget items inside groups - individual hover targets */
+.widget-group > .content > .widget-item:hover {{
+    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+    border-radius: var(--radius-widget);
+}}
+
 /* Spacing between items inside widgets */
 .widget > .content > *:not(:last-child),
 .widget-group > .content .content > *:not(:last-child) {{
