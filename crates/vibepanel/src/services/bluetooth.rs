@@ -18,7 +18,6 @@ use super::callbacks::Callbacks;
 
 // BlueZ D-Bus constants
 const BLUEZ_SERVICE: &str = "org.bluez";
-const ADAPTER_PATH: &str = "/org/bluez/hci0";
 const ADAPTER_IFACE: &str = "org.bluez.Adapter1";
 const DEVICE_IFACE: &str = "org.bluez.Device1";
 const OBJECT_MANAGER_IFACE: &str = "org.freedesktop.DBus.ObjectManager";
@@ -248,7 +247,7 @@ impl BluetoothSnapshot {
 pub struct BluetoothService {
     /// System bus connection.
     connection: RefCell<Option<gio::DBusConnection>>,
-    /// Primary adapter proxy (hci0).
+    /// Primary adapter proxy (dynamically discovered).
     adapter: RefCell<Option<DBusProxy>>,
     /// Current adapter object path (e.g. /org/bluez/hci0).
     adapter_path: RefCell<Option<String>>,
@@ -417,61 +416,13 @@ impl BluetoothService {
                     match res {
                         Ok(proxy) => {
                             this.object_manager.replace(Some(proxy));
+                            this.update_state();
                         }
                         Err(e) => {
                             error!(
                                 "BluetoothService: failed to create ObjectManager proxy: {}",
                                 e
                             );
-                        }
-                    }
-                },
-            );
-
-            // Create Adapter1 proxy
-            let this_weak6 = Rc::downgrade(&this);
-            DBusProxy::new(
-                &connection,
-                DBusProxyFlags::NONE,
-                None,
-                Some(BLUEZ_SERVICE),
-                ADAPTER_PATH,
-                ADAPTER_IFACE,
-                None::<&gio::Cancellable>,
-                move |res| {
-                    let this = match this_weak6.upgrade() {
-                        Some(s) => s,
-                        None => return,
-                    };
-
-                    match res {
-                        Ok(proxy) => {
-                            // Monitor for BlueZ service appearing/disappearing.
-                            let this_weak = Rc::downgrade(&this);
-                            proxy.connect_local("notify::g-name-owner", false, move |values| {
-                                let this = this_weak.upgrade()?;
-                                let proxy = values[0].get::<gio::DBusProxy>().ok();
-                                let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
-                                if has_owner {
-                                    // Service reappeared - refresh state.
-                                    this.update_state();
-                                } else {
-                                    // Service disappeared - mark unavailable.
-                                    this.set_unavailable();
-                                }
-                                None
-                            });
-
-                            this.adapter.replace(Some(proxy));
-                            this.update_state();
-
-                            // Register the BlueZ agent for pairing authentication
-                            Self::register_agent(&this);
-                        }
-                        Err(e) => {
-                            // No adapter might be normal (no Bluetooth hardware)
-                            error!("BluetoothService: failed to create Adapter1 proxy: {}", e);
-                            this.update_state();
                         }
                     }
                 },
@@ -1140,6 +1091,20 @@ impl BluetoothService {
 
                         match res {
                             Ok(proxy) => {
+                                // Monitor for BlueZ service appearing/disappearing.
+                                let this_weak2 = Rc::downgrade(&this);
+                                proxy.connect_local("notify::g-name-owner", false, move |values| {
+                                    let this = this_weak2.upgrade()?;
+                                    let proxy = values[0].get::<gio::DBusProxy>().ok();
+                                    let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
+                                    if has_owner {
+                                        this.update_state();
+                                    } else {
+                                        this.set_unavailable();
+                                    }
+                                    None
+                                });
+
                                 this.adapter.replace(Some(proxy));
                                 *this.adapter_path.borrow_mut() = Some(path_for_closure);
                                 this.update_state();
