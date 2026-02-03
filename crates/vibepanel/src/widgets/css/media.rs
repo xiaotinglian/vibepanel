@@ -61,22 +61,24 @@ pub fn css() -> &'static str {
     min-width: 340px;
 }
 
-/* Popout button */
-.media-popout-btn {
-    min-width: 24px;
-    min-height: 24px;
-    padding: 0px;
+/* Popover header buttons row */
+.media-popover-header {
     margin-top: -8px;
     margin-right: -8px;
+    margin-bottom: 8px;
 }
 
-/* Player selector button */
+/* Override base popover icon button size for denser media layout */
+.media-popout-btn,
 .media-player-selector-btn {
-    min-width: 24px;
-    min-height: 24px;
-    padding: 0px;
-    margin-top: -8px;
-    margin-right: 4px;
+    min-width: 20px;
+    min-height: 20px;
+    margin-top: 0;
+}
+
+/* open_in_new glyph sits slightly high; nudge down for visual centering */
+.media-popout-btn .icon-root {
+    margin-top: 2px;
 }
 
 /* Player selector menu - extends qs-row-menu-content */
@@ -192,7 +194,7 @@ pub fn css() -> &'static str {
 
 .media-seek-slider trough {
     min-height: var(--slider-height);
-    border-radius: var(--radius-track);
+    border-radius: var(--slider-radius);
     background-color: var(--color-slider-track);
 }
 
@@ -201,16 +203,16 @@ pub fn css() -> &'static str {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
     border: none;
     min-height: var(--slider-height);
-    border-radius: var(--radius-track);
+    border-radius: var(--slider-radius);
 }
 
 .media-seek-slider slider {
-    min-width: 16px;
-    min-height: 16px;
+    min-width: var(--slider-knob-size);
+    min-height: var(--slider-knob-size);
     margin: -5px;
     padding: 0;
     background-color: var(--color-accent-primary);
-    border-radius: var(--radius-pill);
+    border-radius: var(--slider-knob-radius);
     border: none;
     box-shadow: none;
     transition: transform 100ms ease-out;
@@ -236,7 +238,7 @@ pub fn css() -> &'static str {
 
 .media-volume-slider trough {
     min-height: var(--slider-height);
-    border-radius: var(--radius-track);
+    border-radius: var(--slider-radius);
     background-color: var(--color-slider-track);
 }
 
@@ -245,16 +247,16 @@ pub fn css() -> &'static str {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
     border: none;
     min-height: var(--slider-height);
-    border-radius: var(--radius-track);
+    border-radius: var(--slider-radius);
 }
 
 .media-volume-slider slider {
-    min-width: 16px;
-    min-height: 16px;
+    min-width: var(--slider-knob-size);
+    min-height: var(--slider-knob-size);
     margin: -5px;
     padding: 0;
     background-color: var(--color-accent-primary);
-    border-radius: var(--radius-pill);
+    border-radius: var(--slider-knob-radius);
     border: none;
     box-shadow: none;
     transition: transform 100ms ease-out;

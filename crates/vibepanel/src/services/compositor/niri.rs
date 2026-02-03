@@ -26,25 +26,22 @@ use super::{
     WorkspaceSnapshot,
 };
 
-/// Reconnect backoff constants (in milliseconds).
 const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 
-/// Shared state between main thread and event loop thread.
 struct SharedState {
-    /// Current workspace snapshot.
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
-    /// Current focused window.
     focused_window: RwLock<Option<WindowInfo>>,
-    /// Workspace metadata (Niri uses dynamic workspaces).
     workspaces: RwLock<Vec<WorkspaceMeta>>,
     /// Map from Niri's u64 workspace ID to our 1-based index.
     id_to_idx: RwLock<HashMap<u64, i32>>,
     /// Map from Niri's u64 workspace ID to output name.
     id_to_output: RwLock<HashMap<u64, String>>,
-    /// Window cache for tracking focus.
     windows: RwLock<HashMap<u64, WindowData>>,
+    /// Per-output active window info (output name -> WindowInfo).
+    /// This tracks the "would be focused" window for each monitor.
+    per_output_window: RwLock<HashMap<String, WindowInfo>>,
 }
 
 impl Default for SharedState {
@@ -56,28 +53,21 @@ impl Default for SharedState {
             id_to_idx: RwLock::new(HashMap::new()),
             id_to_output: RwLock::new(HashMap::new()),
             windows: RwLock::new(HashMap::new()),
+            per_output_window: RwLock::new(HashMap::new()),
         }
     }
 }
 
-/// Niri backend implementation using native socket IPC.
 pub struct NiriBackend {
-    /// Output allow-list (empty = all outputs).
     #[allow(dead_code)] // For future filtering support
     allowed_outputs: Vec<String>,
-    /// Whether the backend is running.
     running: Arc<AtomicBool>,
-    /// Handle to the event loop thread.
     event_thread: Mutex<Option<JoinHandle<()>>>,
-    /// Socket path (from environment).
     socket_path: RwLock<Option<String>>,
-    /// Shared state (accessible from both main thread and event loop).
     shared: Arc<SharedState>,
-    /// Callbacks.
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
 }
 
-/// Cached window data.
 #[derive(Debug, Clone)]
 struct WindowData {
     id: u64,
@@ -88,7 +78,6 @@ struct WindowData {
 }
 
 impl NiriBackend {
-    /// Create a new Niri backend.
     pub fn new(outputs: Option<Vec<String>>) -> Self {
         Self {
             allowed_outputs: outputs.unwrap_or_default(),
@@ -117,11 +106,9 @@ impl NiriBackend {
             }
         };
 
-        // Set timeout
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 
-        // Send request
         let message = format!("{}\n", serde_json::to_string(request).ok()?);
         if let Err(e) = stream.write_all(message.as_bytes()) {
             error!("Failed to send request to Niri: {}", e);
@@ -131,7 +118,6 @@ impl NiriBackend {
         // Shutdown write side to signal end of request
         let _ = stream.shutdown(std::net::Shutdown::Write);
 
-        // Read response
         let mut response = String::new();
         let mut reader = BufReader::new(stream);
         if let Err(e) = reader.read_line(&mut response) {
@@ -322,6 +308,57 @@ impl NiriBackend {
         drop(win_cache);
         Self::update_window_counts(shared);
         Self::update_focused_window_from_cache(shared);
+        Self::update_per_output_windows(shared);
+    }
+
+    /// Update per-output active window info from window cache and workspace state.
+    fn update_per_output_windows(shared: &SharedState) {
+        let win_cache = shared.windows.read();
+        let id_map = shared.id_to_idx.read();
+        let id_to_output = shared.id_to_output.read();
+        let snapshot = shared.workspace_snapshot.read();
+        let mut per_output = shared.per_output_window.write();
+
+        // For each output, find the window to display on its active workspace
+        for (out_name, per_out) in &snapshot.per_output {
+            // Find active workspace's niri ID for this output
+            let active_ws_id = id_to_output.iter().find_map(|(&ws_id, out)| {
+                if out == out_name {
+                    let idx = id_map.get(&ws_id)?;
+                    per_out.active_workspace.contains(idx).then_some(ws_id)
+                } else {
+                    None
+                }
+            });
+
+            // Find best window on that workspace (prefer focused)
+            let win_info = active_ws_id.and_then(|ws_id| {
+                let mut best: Option<&WindowData> = None;
+                for win in win_cache.values() {
+                    if win.workspace_id == Some(ws_id) {
+                        if win.is_focused {
+                            return Some(win);
+                        }
+                        best = best.or(Some(win));
+                    }
+                }
+                best
+            });
+
+            let info = win_info
+                .map(|win| WindowInfo {
+                    title: win.title.clone(),
+                    app_id: win.app_id.clone(),
+                    workspace_id: active_ws_id.and_then(|id| id_map.get(&id).copied()),
+                    output: Some(out_name.clone()),
+                })
+                .unwrap_or_else(|| WindowInfo {
+                    output: Some(out_name.clone()),
+                    ..Default::default()
+                });
+
+            per_output.insert(out_name.clone(), info);
+        }
     }
 
     /// Update focused window info from window cache.
@@ -361,36 +398,44 @@ impl NiriBackend {
     }
 
     /// Update a single window in the cache.
+    ///
+    /// Returns true if this should trigger a window callback (focus changed).
     fn update_single_window(shared: &SharedState, window: &Value) -> bool {
         let Some(win_id) = window.get("id").and_then(|v| v.as_u64()) else {
             return false;
         };
 
+        let title = window
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let app_id = window
+            .get("app_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let workspace_id = window.get("workspace_id").and_then(|v| v.as_u64());
+        let is_focused = window
+            .get("is_focused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let data = WindowData {
             id: win_id,
-            title: window
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            app_id: window
-                .get("app_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            workspace_id: window.get("workspace_id").and_then(|v| v.as_u64()),
-            is_focused: window
-                .get("is_focused")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            title,
+            app_id,
+            workspace_id,
+            is_focused,
         };
 
-        let is_focused = data.is_focused;
         shared.windows.write().insert(win_id, data);
 
         // Update window counts
         Self::update_window_counts(shared);
 
+        // If the window is focused, update focused window.
+        // Focus updates are used by WindowTitleService to display the active window title.
         if is_focused {
             return Self::update_focused_window_from_cache(shared);
         }
@@ -446,18 +491,19 @@ impl NiriBackend {
                 let id_to_output = shared.id_to_output.read();
 
                 if let Some(&idx) = id_map.get(&ws_id) {
+                    let output = id_to_output.get(&ws_id).cloned();
+                    drop(id_to_output);
+                    drop(id_map);
+
                     let mut snapshot = shared.workspace_snapshot.write();
 
-                    // Update global active workspace if this is the focused one
                     if is_focused && !snapshot.active_workspace.contains(&idx) {
                         snapshot.active_workspace.clear();
                         snapshot.active_workspace.insert(idx);
                         workspace_changed = true;
                     }
 
-                    // Always update per-output active workspace
-                    // WorkspaceActivated fires when a workspace becomes visible on its output
-                    if let Some(out_name) = id_to_output.get(&ws_id)
+                    if let Some(ref out_name) = output
                         && let Some(per_out) = snapshot.per_output.get_mut(out_name)
                         && !per_out.active_workspace.contains(&idx)
                     {
@@ -465,26 +511,28 @@ impl NiriBackend {
                         per_out.active_workspace.insert(idx);
                         workspace_changed = true;
                     }
+
+                    drop(snapshot);
+
+                    // Workspace switched - update per-output windows
+                    Self::update_per_output_windows(shared);
+                    window_changed = true;
                 }
             }
         } else if let Some(urgency_changed) = event.get("WorkspaceUrgencyChanged") {
-            let ws_niri_id = urgency_changed.get("id").and_then(|v| v.as_u64());
-            let is_urgent = urgency_changed
-                .get("urgent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            if let Some(ws_id) = urgency_changed.get("id").and_then(|v| v.as_u64()) {
+                let is_urgent = urgency_changed
+                    .get("urgent")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
-            if let Some(ws_id) = ws_niri_id {
                 let id_map = shared.id_to_idx.read();
                 if let Some(&idx) = id_map.get(&ws_id) {
                     let mut snapshot = shared.workspace_snapshot.write();
-                    let was_urgent = snapshot.urgent_workspaces.contains(&idx);
-                    if is_urgent && !was_urgent {
-                        snapshot.urgent_workspaces.insert(idx);
-                        workspace_changed = true;
-                    } else if !is_urgent && was_urgent {
-                        snapshot.urgent_workspaces.remove(&idx);
-                        workspace_changed = true;
+                    if is_urgent {
+                        workspace_changed = snapshot.urgent_workspaces.insert(idx);
+                    } else {
+                        workspace_changed = snapshot.urgent_workspaces.remove(&idx);
                     }
                 }
             }
@@ -495,38 +543,79 @@ impl NiriBackend {
             }
         } else if let Some(window_opened) = event.get("WindowOpenedOrChanged") {
             if let Some(window) = window_opened.get("window") {
-                window_changed = Self::update_single_window(shared, window);
+                Self::update_single_window(shared, window);
 
-                // Also update occupied state
-                if let Some(ws_niri_id) = window.get("workspace_id").and_then(|v| v.as_u64()) {
+                if let Some(ws_id) = window.get("workspace_id").and_then(|v| v.as_u64()) {
                     let id_map = shared.id_to_idx.read();
-                    if let Some(&idx) = id_map.get(&ws_niri_id) {
+                    if let Some(&idx) = id_map.get(&ws_id) {
                         let mut snapshot = shared.workspace_snapshot.write();
-                        if !snapshot.occupied_workspaces.contains(&idx) {
-                            snapshot.occupied_workspaces.insert(idx);
+                        if snapshot.occupied_workspaces.insert(idx) {
                             workspace_changed = true;
                         }
                     }
                 }
+
+                // Window opened/changed - update per-output windows
+                Self::update_per_output_windows(shared);
+                window_changed = true;
             }
         } else if let Some(window_closed) = event.get("WindowClosed") {
             if let Some(win_id) = window_closed.get("id").and_then(|v| v.as_u64()) {
                 shared.windows.write().remove(&win_id);
                 Self::update_window_counts(shared);
-                window_changed = Self::update_focused_window_from_cache(shared);
-                // Window counts changed, so workspace state changed too
+                Self::update_focused_window_from_cache(shared);
+                Self::update_per_output_windows(shared);
+                window_changed = true;
                 workspace_changed = true;
             }
-        } else if let Some(focus_changed) = event.get("WindowFocusChanged")
-            && let Some(win_id) = focus_changed.get("id").and_then(|v| v.as_u64())
-        {
-            // Update focus state in cache
+        } else if let Some(focus_changed) = event.get("WindowFocusChanged") {
+            let win_id = focus_changed.get("id").and_then(|v| v.as_u64());
             let mut win_cache = shared.windows.write();
             for win in win_cache.values_mut() {
-                win.is_focused = win.id == win_id;
+                win.is_focused = win_id.is_some_and(|id| win.id == id);
             }
             drop(win_cache);
-            window_changed = Self::update_focused_window_from_cache(shared);
+            Self::update_focused_window_from_cache(shared);
+            Self::update_per_output_windows(shared);
+            window_changed = true;
+        } else if let Some(active_changed) = event.get("WorkspaceActiveWindowChanged") {
+            let ws_niri_id = active_changed.get("workspace_id").and_then(|v| v.as_u64());
+            let active_win_id = active_changed
+                .get("active_window_id")
+                .and_then(|v| v.as_u64());
+
+            if let Some(ws_id) = ws_niri_id {
+                let id_to_output = shared.id_to_output.read();
+                let id_map = shared.id_to_idx.read();
+
+                if let Some(output) = id_to_output.get(&ws_id).cloned() {
+                    let workspace_idx = id_map.get(&ws_id).copied();
+                    drop(id_to_output);
+                    drop(id_map);
+
+                    let win_info = if let Some(win_id) = active_win_id {
+                        let win_cache = shared.windows.read();
+                        win_cache.get(&win_id).map(|win| WindowInfo {
+                            title: win.title.clone(),
+                            app_id: win.app_id.clone(),
+                            workspace_id: workspace_idx,
+                            output: Some(output.clone()),
+                        })
+                    } else {
+                        None
+                    };
+
+                    let mut per_output = shared.per_output_window.write();
+                    per_output.insert(
+                        output.clone(),
+                        win_info.unwrap_or(WindowInfo {
+                            output: Some(output),
+                            ..Default::default()
+                        }),
+                    );
+                    window_changed = true;
+                }
+            }
         }
 
         (workspace_changed, window_changed)
@@ -545,8 +634,10 @@ impl NiriBackend {
         // Emit initial state
         if let Some((ref ws_cb, ref win_cb)) = callbacks {
             ws_cb(shared.workspace_snapshot.read().clone());
-            if let Some(ref win) = *shared.focused_window.read() {
-                win_cb(win.clone());
+            // Emit window info for all outputs (including empty info for outputs with no active window)
+            let per_output = shared.per_output_window.read();
+            for win_info in per_output.values() {
+                win_cb(win_info.clone());
             }
         }
 
@@ -628,10 +719,12 @@ impl NiriBackend {
                                     if ws_changed {
                                         ws_cb(shared.workspace_snapshot.read().clone());
                                     }
-                                    if win_changed
-                                        && let Some(ref win) = *shared.focused_window.read()
-                                    {
-                                        win_cb(win.clone());
+                                    if win_changed {
+                                        // Emit updates for all outputs with their current active window
+                                        let per_output = shared.per_output_window.read();
+                                        for win_info in per_output.values() {
+                                            win_cb(win_info.clone());
+                                        }
                                     }
                                 }
                             }

@@ -12,6 +12,16 @@ pub fn css() -> String {
         r#"
 /* ===== SHARED UTILITY CSS ===== */
 
+/* Layer-shell popover window - transparent so content can have proper shadow */
+window.layer-shell-popover {{
+    background: transparent;
+}}
+
+/* Layer-shell click catcher - transparent overlay */
+window.layer-shell-click-catcher {{
+    background: transparent;
+}}
+
 /* 
  * Icon sizing strategy:
  * - .material-symbol uses font-size: inherit (set in icons.rs)
@@ -102,6 +112,10 @@ label link:active {{
     background-color: {widget_bg};
     border-radius: var(--radius-surface);
     box-shadow: var(--shadow-soft);
+    padding: 16px;
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    color: var(--color-foreground-primary);
 }}
 
 popover.widget-menu {{
@@ -169,7 +183,7 @@ popover.widget-menu.background > contents {{
 
 .slider-row scale trough {{
     min-height: var(--slider-height);
-    border-radius: var(--radius-track);
+    border-radius: var(--slider-radius);
     background-color: var(--color-slider-track);
 }}
 
@@ -178,16 +192,16 @@ popover.widget-menu.background > contents {{
     background-color: var(--color-accent-slider, var(--color-accent-primary));
     border: none;
     min-height: var(--slider-height);
-    border-radius: var(--radius-track);
+    border-radius: var(--slider-radius);
 }}
 
 .slider-row scale slider {{
-    min-width: 16px;
-    min-height: 16px;
+    min-width: var(--slider-knob-size);
+    min-height: var(--slider-knob-size);
     margin: -5px;
     padding: 0;
     background-color: var(--color-accent-primary);
-    border-radius: var(--radius-pill);
+    border-radius: var(--slider-knob-radius);
     border: none;
     box-shadow: none;
     transition: transform 100ms ease-out;
@@ -213,8 +227,8 @@ popover.widget-menu.background > contents {{
 
 /* Slider row expander (B) */
 .slider-row .qs-toggle-more {{
-    min-width: 32px;
-    min-height: 32px;
+    min-width: calc(var(--icon-size) * 2);
+    min-height: calc(var(--icon-size) * 2);
     padding: 0;
     border-radius: var(--radius-widget);
 }}

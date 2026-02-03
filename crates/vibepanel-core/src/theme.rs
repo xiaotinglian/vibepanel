@@ -366,9 +366,8 @@ impl ThemePalette {
     --radius-widget-lg: calc({radius_widget} * 2);            /* Larger surfaces that scale with widget */
     --radius-pill: {radius_pill}px;
     --radius-card: {radius_card}px;                        /* Cards/containers - never goes pill */
-    --radius-track: calc(var(--radius-pill) * 0.4);        /* Thin (6px) slider troughs */
-    --radius-track-thick: calc(var(--radius-pill) * 0.75); /* Thick (10px) OSD sliders, switch sliders */
     --radius-round: 9999px;                                /* Always circular */
+    --radius-factor: {radius_factor};                      /* 0.0 at 0%, 1.0 at 50%+ for fixed-size elements */
 
     /* ===== Sizes & Spacing ===== */
     --bar-height: {bar_height}px;
@@ -393,13 +392,21 @@ impl ThemePalette {
     --card-padding: var(--spacing-md);
     --row-padding-v: var(--spacing-sm);
     --row-padding-h: var(--spacing-md);
-    --slider-height: 6px;
 
     /* ===== Typography ===== */
     --font-family: {font_family};
     --font-scale: {font_scale};
     --font-size: calc(var(--widget-height) * var(--font-scale));
     --font-size-text-icon: {text_icon_size}px;
+
+    /* Slider height - scales with widget height */
+    --slider-height: calc(var(--widget-height) * 0.25);
+    --slider-height-thick: calc(var(--widget-height) * 0.4);
+    --slider-knob-size: calc(var(--widget-height) * 0.65);
+    /* Slider radii - half of height, scaled by radius factor */
+    --slider-radius: calc(var(--widget-height) * 0.125 * {radius_factor});
+    --slider-radius-thick: calc(var(--widget-height) * 0.2 * {radius_factor});
+    --slider-knob-radius: calc(var(--widget-height) * 0.325 * {radius_factor});
 
     /* Font size scale for visual hierarchy */
     --font-size-lg: 1.1em;    /* Headings, section titles */
@@ -448,6 +455,7 @@ impl ThemePalette {
             },
             radius_card = self.widget_border_radius,
             radius_pill = self.radius_pill,
+            radius_factor = (self.widget_radius_percent as f64 / 50.0).min(1.0),
             bar_height = self.sizes.bar_height,
             // Visual padding always applies (widgets offset from edge),
             // but exclusive zone only includes it when bar is visible (handled in bar.rs)
