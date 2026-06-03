@@ -52,6 +52,7 @@ const GTK_COLOR_SCHEME_KEY: &str = "color-scheme";
 use crate::bar;
 use crate::services::audio::AudioService;
 use crate::services::bar_manager::BarManager;
+use crate::services::gpu::GpuService;
 use crate::services::icons::IconsService;
 use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -946,6 +947,10 @@ impl ConfigManager {
         // Store the new config AFTER theme/CSS update but BEFORE widget rebuild,
         // so widgets see the new values when notified
         *self.config.borrow_mut() = new_config.clone();
+
+        if old_config.widgets.get_options("gpu") != new_config.widgets.get_options("gpu") {
+            GpuService::global().reconfigure();
+        }
 
         // Restart or stop wallpaper polling if auto mode or wallpaper config changed
         if old_config.theme.mode != new_config.theme.mode
