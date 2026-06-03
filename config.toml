@@ -54,6 +54,9 @@ background_opacity = 1.0
 #   [widgets.media]
 #   visualizer = true  # Enable/disable cava audio visualizer (default: true)
 #
+#   [widgets.gpu]
+#   devices = "auto"  # "auto" (default) shows the preferred GPU only; "all" shows every detected GPU; [1, 2] shows explicit GPU indices
+#
 #   [widgets.notifications]
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
 #

@@ -59,7 +59,7 @@ pub struct GpuConfig {
 
 impl WidgetConfig for GpuConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("gpu", entry, &["show_icon", "format", "device"]);
+        warn_unknown_options("gpu", entry, &["show_icon", "format", "device", "devices"]);
 
         let show_icon = entry
             .options
