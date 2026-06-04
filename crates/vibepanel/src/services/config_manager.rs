@@ -948,9 +948,9 @@ impl ConfigManager {
         // so widgets see the new values when notified
         *self.config.borrow_mut() = new_config.clone();
 
-        if old_config.widgets.get_options("gpu") != new_config.widgets.get_options("gpu") {
-            GpuService::global().reconfigure();
-        }
+        // Keep GPU display selection in sync on every successful config apply
+        // using this exact parsed config snapshot (no extra global re-read).
+        GpuService::global().reconfigure_with_widget_options(new_config.widgets.get_options("gpu"));
 
         // Restart or stop wallpaper polling if auto mode or wallpaper config changed
         if old_config.theme.mode != new_config.theme.mode

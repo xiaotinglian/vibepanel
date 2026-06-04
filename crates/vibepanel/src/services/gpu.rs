@@ -43,6 +43,7 @@ use gtk4::glib::{self, SourceId};
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use tracing::{debug, trace, warn};
+use vibepanel_core::config::WidgetOptions;
 
 use super::callbacks::{CallbackId, Callbacks};
 use super::config_manager::ConfigManager;
@@ -279,10 +280,13 @@ pub struct GpuService {
     timer_source: RefCell<Option<SourceId>>,
 
     /// All discovered GPU devices.
-    devices: Vec<GpuDevice>,
+    devices: RefCell<Vec<GpuDevice>>,
 
     /// GPU indices currently configured for display and polling.
     display_indices: RefCell<Vec<usize>>,
+
+    /// Current GPU display mode from config.
+    display_selection: RefCell<GpuDisplaySelection>,
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
@@ -314,8 +318,9 @@ impl GpuService {
             snapshot: RefCell::new(initial_snapshot),
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
-            devices,
+            devices: RefCell::new(devices),
             display_indices: RefCell::new(display_indices),
+            display_selection: RefCell::new(display_selection),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
             poll_requests: Cell::new(0),
         })
@@ -349,27 +354,14 @@ impl GpuService {
         self.snapshot.borrow().clone()
     }
 
-    pub fn reconfigure(&self) {
-        if !self.refresh_display_selection() {
-            return;
-        }
+    pub fn reconfigure_with_widget_options(&self, widget_options: Option<&WidgetOptions>) {
+        let display_selection = Self::read_display_config_from_widget_options(widget_options);
+        self.refresh_discovered_devices();
+        self.apply_display_selection(display_selection);
 
-        if self.poll_requests.get() > 0 {
-            self.poll();
-            return;
-        }
-
-        let snapshot = if self.display_indices.borrow().is_empty() {
-            GpuSnapshot::unknown()
-        } else {
-            GpuSnapshot {
-                available: true,
-                ..Default::default()
-            }
-        };
-
-        *self.snapshot.borrow_mut() = snapshot;
-        self.callbacks.notify(&self.snapshot.borrow());
+        // Recompute a concrete snapshot immediately so config transitions like
+        // auto->all publish the full device list instead of placeholder data.
+        self.poll();
     }
 
     fn start_polling(this: &Rc<Self>) {
@@ -405,7 +397,7 @@ impl GpuService {
     /// Requires `&Rc<Self>` because `start_polling` creates a weak reference
     /// for the timer closure.
     pub fn request_polling(this: &Rc<Self>) {
-        if this.devices.is_empty() {
+        if this.devices.borrow().is_empty() {
             return;
         }
         let prev = this.poll_requests.get();
@@ -432,24 +424,61 @@ impl GpuService {
     }
 
     fn poll(&self) {
-        let display_indices = self.display_indices.borrow();
-        let snapshot = if display_indices.is_empty() {
-            GpuSnapshot::unknown()
-        } else {
-            let mut snapshots = Vec::with_capacity(display_indices.len());
+        let display_selection = self.display_selection.borrow().clone();
+        let snapshot = match display_selection {
+            GpuDisplaySelection::Auto => self.poll_auto_snapshot(),
+            _ => {
+                let display_indices = self.display_indices.borrow().clone();
+                if display_indices.is_empty() {
+                    GpuSnapshot::unknown()
+                } else {
+                    let devices = self.devices.borrow();
+                    let mut snapshots = Vec::with_capacity(display_indices.len());
 
-            for &idx in display_indices.iter() {
-                if let Some(device) = self.devices.get(idx) {
-                    snapshots.push(Self::poll_device(idx, device));
+                    for &idx in &display_indices {
+                        if let Some(device) = devices.get(idx) {
+                            snapshots.push(Self::poll_device(idx, device));
+                        }
+                    }
+
+                    GpuSnapshot::from_devices(snapshots)
                 }
             }
-
-            GpuSnapshot::from_devices(snapshots)
         };
-        drop(display_indices);
-
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
+    }
+
+    fn poll_auto_snapshot(&self) -> GpuSnapshot {
+        let devices = self.devices.borrow();
+        if devices.is_empty() {
+            return GpuSnapshot::unknown();
+        }
+
+        let mut sampled = Vec::with_capacity(devices.len());
+        for (idx, device) in devices.iter().enumerate() {
+            sampled.push((idx, Self::poll_device(idx, device)));
+        }
+
+        let Some(selected_idx) = Self::choose_auto_index_from_samples(&devices, &sampled) else {
+            return GpuSnapshot::unknown();
+        };
+
+        let mut display_indices = self.display_indices.borrow_mut();
+        if display_indices.first().copied() != Some(selected_idx) {
+            debug!(
+                "GpuService: auto-selected active GPU index {}",
+                selected_idx
+            );
+            *display_indices = vec![selected_idx];
+        }
+        drop(display_indices);
+
+        sampled
+            .into_iter()
+            .find_map(|(idx, snapshot)| (idx == selected_idx).then_some(snapshot))
+            .map(|snapshot| GpuSnapshot::from_devices(vec![snapshot]))
+            .unwrap_or_else(GpuSnapshot::unknown)
     }
 
     fn poll_device(idx: usize, device: &GpuDevice) -> GpuDeviceSnapshot {
@@ -735,6 +764,25 @@ impl GpuService {
         GpuDisplaySelection::Auto
     }
 
+    fn read_display_config_from_widget_options(
+        widget_options: Option<&WidgetOptions>,
+    ) -> GpuDisplaySelection {
+        let Some(widget_options) = widget_options else {
+            return GpuDisplaySelection::Auto;
+        };
+
+        if let Some(value) = widget_options.options.get("devices") {
+            return Self::parse_display_selection_value(value, "devices").unwrap_or_default();
+        }
+
+        if let Some(value) = widget_options.options.get("device") {
+            debug!("GpuService: using legacy 'device' option; prefer 'devices'");
+            return Self::parse_display_selection_value(value, "device").unwrap_or_default();
+        }
+
+        GpuDisplaySelection::Auto
+    }
+
     fn parse_display_selection_value(
         value: &toml::Value,
         option_name: &str,
@@ -750,17 +798,20 @@ impl GpuService {
                 );
                 None
             }
-            toml::Value::String(mode) => match mode.to_lowercase().as_str() {
-                "auto" => Some(GpuDisplaySelection::Auto),
-                "all" => Some(GpuDisplaySelection::All),
-                _ => {
-                    warn!(
-                        "GpuService: invalid '{}' config value {:?}, expected 'auto', 'all', an integer, or an array of integers; using auto",
-                        option_name, mode,
-                    );
-                    None
+            toml::Value::String(mode) => {
+                let normalized = mode.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "auto" => Some(GpuDisplaySelection::Auto),
+                    "all" => Some(GpuDisplaySelection::All),
+                    _ => {
+                        warn!(
+                            "GpuService: invalid '{}' config value {:?}, expected 'auto', 'all', an integer, or an array of integers; using auto",
+                            option_name, mode,
+                        );
+                        None
+                    }
                 }
-            },
+            }
             toml::Value::Array(entries) => {
                 let mut indices = Vec::new();
                 for entry in entries {
@@ -833,17 +884,55 @@ impl GpuService {
         }
     }
 
-    fn refresh_display_selection(&self) -> bool {
-        let display_selection = Self::read_display_config();
-        let display_indices = Self::resolve_display_indices(&self.devices, &display_selection);
-        let changed = *self.display_indices.borrow() != display_indices;
+    fn apply_display_selection(&self, display_selection: GpuDisplaySelection) -> bool {
+        let selection_changed = *self.display_selection.borrow() != display_selection;
+        *self.display_selection.borrow_mut() = display_selection.clone();
 
-        if changed {
-            Self::log_display_selection(&self.devices, &display_selection, &display_indices);
+        let devices = self.devices.borrow();
+        let display_indices = Self::resolve_display_indices(&devices, &display_selection);
+        let indices_changed = *self.display_indices.borrow() != display_indices;
+        let changed = selection_changed || indices_changed;
+
+        if indices_changed {
+            Self::log_display_selection(&devices, &display_selection, &display_indices);
             *self.display_indices.borrow_mut() = display_indices;
         }
 
         changed
+    }
+
+    fn choose_auto_index_from_samples(
+        devices: &[GpuDevice],
+        sampled: &[(usize, GpuDeviceSnapshot)],
+    ) -> Option<usize> {
+        let highest_usage = sampled
+            .iter()
+            .filter(|(_, snap)| snap.power_state != GpuPowerState::Suspended)
+            .filter_map(|(idx, snap)| snap.gpu_usage.map(|usage| (*idx, usage)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((idx, usage)) = highest_usage
+            && usage > 0.0
+        {
+            return Some(idx);
+        }
+
+        Self::auto_select(devices)
+    }
+
+    fn refresh_discovered_devices(&self) {
+        let refreshed = Self::discover_all_gpus();
+        let previous_count = self.devices.borrow().len();
+        let refreshed_count = refreshed.len();
+
+        if previous_count != refreshed_count {
+            debug!(
+                "GpuService: refreshed GPU discovery count {} -> {}",
+                previous_count, refreshed_count
+            );
+        }
+
+        *self.devices.borrow_mut() = refreshed;
     }
 
     fn resolve_display_indices(
@@ -1305,6 +1394,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_display_selection_trims_string_values() {
+        assert_eq!(
+            GpuService::parse_display_selection_value(
+                &toml::Value::String("  all  ".to_string()),
+                "devices"
+            ),
+            Some(GpuDisplaySelection::All)
+        );
+        assert_eq!(
+            GpuService::parse_display_selection_value(
+                &toml::Value::String("\tauto\n".to_string()),
+                "devices"
+            ),
+            Some(GpuDisplaySelection::Auto)
+        );
+    }
+
+    #[test]
     fn test_parse_display_selection_accepts_integer_and_array() {
         assert_eq!(
             GpuService::parse_display_selection_value(&toml::Value::Integer(2), "devices"),
@@ -1373,6 +1480,68 @@ mod tests {
         assert_eq!(
             GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::Explicit(vec![9]),),
             vec![1]
+        );
+    }
+
+    #[test]
+    fn test_choose_auto_index_from_samples_prefers_highest_usage() {
+        let devices = vec![
+            dummy_amd("iGPU", false, true),
+            dummy_amd("dGPU", true, false),
+        ];
+        let sampled = vec![
+            (
+                0,
+                GpuDeviceSnapshot {
+                    power_state: GpuPowerState::Active,
+                    gpu_usage: Some(12.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                1,
+                GpuDeviceSnapshot {
+                    power_state: GpuPowerState::Active,
+                    gpu_usage: Some(65.0),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        assert_eq!(
+            GpuService::choose_auto_index_from_samples(&devices, &sampled),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_choose_auto_index_from_samples_falls_back_to_auto_select() {
+        let devices = vec![
+            dummy_amd("iGPU", false, true),
+            dummy_amd("dGPU", true, false),
+        ];
+        let sampled = vec![
+            (
+                0,
+                GpuDeviceSnapshot {
+                    power_state: GpuPowerState::Active,
+                    gpu_usage: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                1,
+                GpuDeviceSnapshot {
+                    power_state: GpuPowerState::Active,
+                    gpu_usage: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        assert_eq!(
+            GpuService::choose_auto_index_from_samples(&devices, &sampled),
+            Some(1)
         );
     }
 
